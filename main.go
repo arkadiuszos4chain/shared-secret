@@ -10,6 +10,7 @@ import (
 
 	"github.com/bitcoinschema/go-bitcoin/v2"
 	"github.com/libsv/go-bk/bec"
+	"github.com/libsv/go-bk/chaincfg"
 	"github.com/libsv/go-bk/wif"
 )
 
@@ -88,9 +89,9 @@ func m() {
 	sumModN := sum.Mod(sum, bec.S256().N)
 
 	// derive the pubkey and check if it's what we're expecting.
-	_, bobPaymentPubKey := bec.PrivKeyFromBytes(bec.S256(), sumModN.Bytes())
-	bps := bobPaymentPubKey.SerialiseCompressed()
-	fmt.Println("bobPaymentPubKey: ", hex.EncodeToString(bps))
+	paymentPrivKey, bobPaymentPubKey := bec.PrivKeyFromBytes(bec.S256(), sumModN.Bytes())
+	wif, _ := wif.NewWIF(paymentPrivKey, &chaincfg.MainNet, true)
+	fmt.Println("bobPaymentPrivKey: ", wif.String())
 	if hex.EncodeToString(paymentPubKey) == hex.EncodeToString(bobPaymentPubKey.SerialiseCompressed()) {
 		fmt.Printf("\nBob will be able unlock the utxo.")
 	} else {
