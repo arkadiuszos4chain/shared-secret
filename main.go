@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/bitcoinschema/go-bitcoin/v2"
@@ -17,119 +19,101 @@ const (
 )
 
 func m() {
-	// alice
-	fmt.Println("alice xPriv ", alice_xpriv)
-	alice_hdXpriv, _ := bitcoin.GenerateHDKeyFromString(alice_xpriv)
+	fmt.Printf("\n\n█████████████████████████████████████████████████████████████████████████████████████████\n")
+	sha := sha256.Sum256([]byte("alice@wallet.com connection request to bob@wallet.com at " + time.Now().String()))
+	connectionID := sha[:]
+	fmt.Printf("\nconnectionID: %s\n\n", hex.EncodeToString(connectionID))
 
-	fmt.Println("get master XPub key for alice")
-	alice_masterHdXpub, _ := alice_hdXpriv.Neuter()
-	fmt.Println(alice_masterHdXpub)
+	a_xpriv, _ := bitcoin.GenerateHDKeyFromString(alice_xpriv)
+	a_xpub, _ := a_xpriv.Neuter()
+	a_child, _ := bitcoin.GetHDKeyChild(a_xpub, uint32(0))
+	a_pubkey, _ := a_child.ECPubKey()
+	a_intermediate, _ := a_xpriv.DeriveChildFromPath("0")
+	a_privkey, _ := a_intermediate.ECPrivKey()
 
-	fmt.Println("craete alice \"paymail External PubKey\" - it is used to rotate PubKey in PKI endpoint in SPV Wallet")
-	alice_ChildHdXPub, _ := bitcoin.GetHDKeyChild(alice_masterHdXpub, uint32(0)) // Paymail external XPUB
-	fmt.Println("alice External Paymail Pubkey ", alice_ChildHdXPub)
+	fmt.Printf("alice pubkey: %s\n\n", hex.EncodeToString(a_pubkey.SerialiseCompressed()))
 
-	// when we call PKI url we get:
-	// alice_ChildHdXPub.Child(nextNum)
+	b_xpriv, _ := bitcoin.GenerateHDKeyFromString(bob_xpriv)
+	b_xpub, _ := b_xpriv.Neuter()
+	b_child, _ := bitcoin.GetHDKeyChild(b_xpub, uint32(0))
+	b_pubkey, _ := b_child.ECPubKey()
+	b_intermediate, _ := b_xpriv.DeriveChildFromPath("0")
+	b_privkey, _ := b_intermediate.ECPrivKey()
 
-	// bob
-	fmt.Println("\nbob xPriv ", bob_xpriv)
-	bob_hdXpriv, _ := bitcoin.GenerateHDKeyFromString(bob_xpriv)
+	fmt.Printf("bob pubkey: %s\n\n", hex.EncodeToString(b_pubkey.SerialiseCompressed()))
 
-	fmt.Println("get master XPub key for bob")
-	bob_masterHdXpub, _ := bob_hdXpriv.Neuter()
-	fmt.Println(bob_masterHdXpub)
+	S_alices := sharedSecret(a_privkey, b_pubkey)
+	S_bobs := sharedSecret(b_privkey, a_pubkey)
 
-	fmt.Println("craete bob \"paymail External PubKey\" - it is used to rotate PubKey in PKI endpoint in SPV Wallet")
-	bob_ChildHdXpub, _ := bitcoin.GetHDKeyChild(bob_masterHdXpub, uint32(0)) // Paymail external XPUB
-	fmt.Println("bob External Paymail Pubkey ", bob_ChildHdXpub)
+	fmt.Printf("alice secret: %s\n", hex.EncodeToString(S_alices))
+	fmt.Printf("bob secret: %s\n", hex.EncodeToString(S_bobs))
+	if hex.EncodeToString(S_alices) == hex.EncodeToString(S_bobs) {
+		fmt.Printf("secrets are the same")
+	} else {
+		fmt.Printf("secrets are different")
+	}
 
-	//
-	aXpriv, _ := alice_hdXpriv.ECPrivKey()
-	aMasterXpub, _ := alice_masterHdXpub.ECPubKey()
-	aXPub, _ := alice_ChildHdXPub.ECPubKey()
+	fmt.Printf("\n\n█████████████████████████████████████████████████████████████████████████████████████████\n")
 
-	bXpriv, _ := bob_hdXpriv.ECPrivKey()
-	bMasterXpub, _ := bob_masterHdXpub.ECPubKey()
-	bXpub, _ := bob_ChildHdXpub.ECPubKey()
+	// calculate an Hmac of the shared secret and connectionID
+	ha := Hmac(S_alices, connectionID)
 
-	fmt.Println()
-	fmt.Println("Compare shared secrets from different PubKeys")
-	// shared secrets
-	// master based secrets
-	fmt.Println("\nsecrets computed based on master XPub and xPriv (should be the same)")
-	amX := sharedSecret(aXpriv, bMasterXpub)
-	bmX := sharedSecret(bXpriv, aMasterXpub)
+	fmt.Printf("\nAlice's Hmac: %s\n\n", hex.EncodeToString(ha))
 
-	fmt.Println("alice ", hex.EncodeToString(amX))
-	fmt.Println("bob ", hex.EncodeToString(bmX))
+	// H is h.G where G is the generator point of the curve
+	X, Y := bec.S256().ScalarBaseMult(ha)
 
-	// child based secrets
+	// alice can now calculate a public key for bob using point addition of H and B
+	lX, lY := bec.S256().Add(X, Y, b_pubkey.X, b_pubkey.Y)
 
-	fmt.Println("\nsecrets computed based on External Pubkey and xPriv (they are not same)")
-	aX := sharedSecret(aXpriv, bXpub)
-	bX := sharedSecret(bXpriv, aXPub)
-
-	fmt.Println("alice ", hex.EncodeToString(aX))
-	fmt.Println("bob ", hex.EncodeToString(bX))
-
-	// child xpub based on random hash
-	fmt.Println("\n create new PubKey based on Master Pub key and random hash (known by both Alice and Bob)")
-	randomHash := sha256.Sum256([]byte(time.Now().String()))
-
-	arcxpubX, arcxpubY := bec.S256().ScalarMult(aMasterXpub.X, aMasterXpub.Y, randomHash[:])
-	arhXpub := &bec.PublicKey{
-		X:     arcxpubX,
-		Y:     arcxpubY,
+	// encode it as a normal pubkey commpressed mode
+	lPub := bec.PublicKey{
+		X:     lX,
+		Y:     lY,
 		Curve: bec.S256(),
 	}
 
-	brcxpubX, brcxpubY := bec.S256().ScalarMult(bMasterXpub.X, bMasterXpub.Y, randomHash[:])
-	brhXpub := &bec.PublicKey{
-		X:     brcxpubX,
-		Y:     brcxpubY,
-		Curve: bec.S256(),
+	paymentPubKey := lPub.SerialiseCompressed()
+
+	fmt.Printf("paymentPubKey: %s", hex.EncodeToString(paymentPubKey))
+
+	fmt.Printf("\n\n█████████████████████████████████████████████████████████████████████████████████████████\n")
+	// Now to show how Bob can unlock we'll derive a key from the same Shared Secret, connectionID, and Bob's privkey
+	hb := Hmac(S_bobs, connectionID)
+	fmt.Printf("\nBob's Hmac: %s\n\n", hex.EncodeToString(hb))
+	var hbap big.Int
+	hbloop := hbap.SetBytes(hb)
+	// add hb and b mod N
+	sum := b_privkey.D.Add(b_privkey.D, hbloop)
+	sumModN := sum.Mod(sum, bec.S256().N)
+
+	// derive the pubkey and check if it's what we're expecting.
+	_, bobPaymentPubKey := bec.PrivKeyFromBytes(bec.S256(), sumModN.Bytes())
+	bps := bobPaymentPubKey.SerialiseCompressed()
+	fmt.Println("bobPaymentPubKey: ", hex.EncodeToString(bps))
+	if hex.EncodeToString(paymentPubKey) == hex.EncodeToString(bobPaymentPubKey.SerialiseCompressed()) {
+		fmt.Printf("\nBob will be able unlock the utxo.")
+	} else {
+		fmt.Printf("\nBob will not be able unlock the utxo.")
 	}
 
-	fmt.Println("secrets computed based on new XPub and xPriv (should be the same)")
-	fmt.Println("NOTICE: new xPub were computed usign 'ScalarMult()'")
-	aX = sharedSecret(aXpriv, brhXpub)
-	bX = sharedSecret(bXpriv, arhXpub)
+	fmt.Printf("\n\n█████████████████████████████████████████████████████████████████████████████████████████\n")
+}
 
-	fmt.Println("alice ", hex.EncodeToString(aX))
-	fmt.Println("bob ", hex.EncodeToString(bX))
-
-	// childe by adding
-	fmt.Println("\nsecrets computed based on new XPub and xPriv (ther ARE NOT the same)")
-	fmt.Println("NOTICE: new xPub were computed usign 'Add()' - i.e. in the same way (simplified) as bitcoin.GetHDKeyChild() does for public keys")
-	ilx, ily := bec.S256().ScalarBaseMult(randomHash[:])
-	childX, childY := bec.S256().Add(ilx, ily, aMasterXpub.X, aMasterXpub.Y)
-	arhXpub2 := &bec.PublicKey{
-		X:     childX,
-		Y:     childY,
-		Curve: bec.S256(),
-	}
-
-	bchildX, bchildY := bec.S256().Add(ilx, ily, bMasterXpub.X, bMasterXpub.Y)
-	brhXpub2 := &bec.PublicKey{
-		X:     bchildX,
-		Y:     bchildY,
-		Curve: bec.S256(),
-	}
-
-	aX = sharedSecret(aXpriv, brhXpub2)
-	bX = sharedSecret(bXpriv, arhXpub2)
-
-	fmt.Println("alice ", hex.EncodeToString(aX))
-	fmt.Println("bob ", hex.EncodeToString(bX))
-
-	fmt.Println()
-
+func Hmac(key []byte, data []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(data)
+	return h.Sum(nil)
 }
 
 func sharedSecret(privKeyA *bec.PrivateKey, pubKeyB *bec.PublicKey) []byte {
-	x, _ := bec.S256().ScalarMult(pubKeyB.X, pubKeyB.Y, privKeyA.D.Bytes())
-	return x.Bytes() // we can use x or y - doesn't matter
+	x, y := bec.S256().ScalarMult(pubKeyB.X, pubKeyB.Y, privKeyA.D.Bytes())
+	P := bec.PublicKey{
+		X:     x,
+		Y:     y,
+		Curve: bec.S256(),
+	}
+	return P.SerialiseCompressed() // to match ts-sdk we encode the pubkey as compressed format which I believe is basically just the x value prepended by a single byte which indicates if y is odd or not.
 }
 
 func sirDeggenExample() {
